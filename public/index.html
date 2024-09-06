@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multiplayer Space Shooter</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: black; }
+        canvas { display: block; }
+        #startScreen { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center; color: white; }
+        #startButton { font-size: 24px; padding: 10px 20px; }
+        #scoreBoard { position: absolute; top: 10px; left: 10px; color: white; font-size: 18px; }
+        #playerInfo { position: absolute; top: 10px; right: 10px; color: white; font-size: 24px; }
+        #winnerAnnouncement { 
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: gold; font-size: 48px; text-align: center; display: none;
+            background-color: rgba(0, 0, 0, 0.8); padding: 20px; border-radius: 10px;
+        }
+        #newGameButton { 
+            position: absolute; bottom: 20px; left: 50%; 
+            transform: translateX(-50%); 
+            font-size: 24px; padding: 10px 20px;
+            display: none;
+        }
+        #countdown {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 120px;
+            color: white;
+            display: none;
+        }
+        #gameCanvas {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+    <div id="startScreen">
+        <h1>Multiplayer Space Shooter</h1>
+        <p id="playerCount">Players: 1</p>
+        <button id="startButton" style="display: none;">Start Game</button>
+    </div>
+    <div id="scoreBoard"></div>
+    <div id="playerInfo"></div>
+    <div id="winnerAnnouncement"></div>
+    <button id="newGameButton">New Game</button>
+    <div id="countdown"></div>
+    <script>
+        const GAME_WIDTH = 800;
+        const GAME_HEIGHT = 600;
+
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const startScreen = document.getElementById('startScreen');
+        const startButton = document.getElementById('startButton');
+        const playerCountElement = document.getElementById('playerCount');
+        const newGameButton = document.getElementById('newGameButton');
+        const countdownElement = document.getElementById('countdown');
+
+        canvas.width = GAME_WIDTH;
+        canvas.height = GAME_HEIGHT;
+
+        const ship = { x: GAME_WIDTH / 2, y: GAME_HEIGHT / 2, angle: 0, speed: 5 };
+        const lasers = [];
+        let circles = [];
+        let walls = [];
+        let players = new Map();
+        let myId;
+        let isHost = false;
+        let gameStarted = false;
+        let scores = new Map();
+        let playerNumber;
+
+        const keys = {};
+
+        const ws = new WebSocket('ws://localhost:3000');
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            
+            if (data.type === 'init') {
+                myId = data.player.id;
+                ship.color = data.player.color;
+                circles = data.circles;
+                walls = data.walls;
+                gameStarted = data.gameStarted;
+                isHost = data.isHost;
+                scores = new Map(Object.entries(data.scores));
+                playerNumber = data.playerNumber;
+                updatePlayerInfo();
+                updateScoreBoard();
+                if (isHost) {
+                    startButton.style.display = 'inline-block';
+                }
+            } else if (data.type === 'gameState') {
+                players = new Map(data.gameState.players.map(p => [p.id, p]));
+                scores = new Map(Object.entries(data.gameState.scores));
+                circles = data.gameState.circles;
+                walls = data.gameState.walls;
+                playerCountElement.textContent = `Players: ${players.size}`;
+                if (isHost && players.size > 1) {
+                    startButton.disabled = false;
+                } else {
+                    startButton.disabled = true;
+                }
+                updateScoreBoard();
+            } else if (data.type === 'shoot') {
+                lasers.push({ x: data.x, y: data.y, angle: data.angle, playerId: data.id });
+            } else if (data.type === 'gameStart') {
+                gameStarted = true;
+                circles = data.circles;
+                walls = data.walls;
+                scores = new Map(Object.entries(data.scores));
+                startScreen.style.display = 'none';
+                countdownElement.style.display = 'none';
+                document.getElementById('winnerAnnouncement').style.display = 'none';
+                updateScoreBoard();
+            } else if (data.type === 'updateCircles') {
+                circles = data.circles;
+                scores = new Map(Object.entries(data.scores));
+                updateScoreBoard();
+            } else if (data.type === 'gameOver') {
+                gameStarted = false;
+                scores = new Map(Object.entries(data.scores));
+                startScreen.style.display = 'block';
+                startButton.style.display = 'none';
+                newGameButton.style.display = isHost ? 'block' : 'none';
+                updateScoreBoard();
+                announceWinner(data.winner);
+            } else if (data.type === 'becomeHost') {
+                isHost = true;
+                if (!gameStarted) {
+                    newGameButton.style.display = 'block';
+                }
+            } else if (data.type === 'resetGame') {
+                resetGame(data.circles, data.walls);
+            } else if (data.type === 'countdown') {
+                startScreen.style.display = 'none';
+                countdownElement.style.display = 'block';
+                countdownElement.textContent = data.count;
+            }
+        };
+
+        function updatePlayerInfo() {
+            const playerInfo = document.getElementById('playerInfo');
+            playerInfo.textContent = `You are Player ${playerNumber}`;
+        }
+
+        function updateScoreBoard() {
+            const scoreBoard = document.getElementById('scoreBoard');
+            scoreBoard.innerHTML = Array.from(scores.entries())
+                .map(([id, score]) => {
+                    const player = players.get(parseInt(id));
+                    return `Player ${player ? player.playerNumber : 'Unknown'}${id == myId ? ' (You)' : ''}: ${score}`;
+                })
+                .join('<br>');
+        }
+
+        function announceWinner(winner) {
+            const winnerAnnouncement = document.getElementById('winnerAnnouncement');
+            winnerAnnouncement.style.display = 'block';
+            const winnerPlayer = players.get(parseInt(winner.id));
+            if (winnerPlayer) {
+                winnerAnnouncement.innerHTML = `WINNER:<br>Player ${winnerPlayer.playerNumber}${winner.id == myId ? ' (You)' : ''}<br>Score: ${winner.score}`;
+            } else {
+                winnerAnnouncement.innerHTML = `WINNER:<br>Player (Disconnected)<br>Score: ${winner.score}`;
+            }
+        }
+
+        function drawShip(x, y, angle, color) {
+            ctx.save();
+            ctx.translate(x, y);
+            ctx.rotate(angle);
+            ctx.beginPath();
+            ctx.moveTo(20, 0);
+            ctx.lineTo(-10, 10);
+            ctx.lineTo(-10, -10);
+            ctx.closePath();
+            ctx.fillStyle = color;
+            ctx.fill();
+            ctx.restore();
+        }
+
+        function drawLasers() {
+            ctx.strokeStyle = 'red';
+            ctx.lineWidth = 2;
+            lasers.forEach(laser => {
+                ctx.beginPath();
+                ctx.moveTo(laser.x, laser.y);
+                ctx.lineTo(laser.x + Math.cos(laser.angle) * 20, laser.y + Math.sin(laser.angle) * 20);
+                ctx.stroke();
+            });
+        }
+
+        function drawCircles() {
+            circles.forEach(circle => {
+                ctx.beginPath();
+                ctx.arc(circle.x, circle.y, circle.radius, 0, Math.PI * 2);
+                ctx.fillStyle = circle.color;
+                ctx.fill();
+            });
+        }
+
+        function drawWalls() {
+            ctx.fillStyle = 'rgb(100, 100, 100)';
+            walls.forEach(wall => {
+                ctx.fillRect(wall.x, wall.y, wall.width, wall.height);
+            });
+        }
+
+        function update() {
+            if (!gameStarted) return;
+
+            let newX = ship.x;
+            let newY = ship.y;
+
+            if (keys.ArrowUp) {
+                newX += Math.cos(ship.angle) * ship.speed;
+                newY += Math.sin(ship.angle) * ship.speed;
+            }
+            if (keys.ArrowLeft) ship.angle -= 0.1;
+            if (keys.ArrowRight) ship.angle += 0.1;
+
+            // Check collision with walls
+            let collision = false;
+            walls.forEach(wall => {
+                if (newX > wall.x && newX < wall.x + wall.width &&
+                    newY > wall.y && newY < wall.y + wall.height) {
+                    collision = true;
+                }
+            });
+
+            if (!collision) {
+                ship.x = newX;
+                ship.y = newY;
+            }
+
+            ship.x = (ship.x + GAME_WIDTH) % GAME_WIDTH;
+            ship.y = (ship.y + GAME_HEIGHT) % GAME_HEIGHT;
+
+            ws.send(JSON.stringify({ type: 'update', x: ship.x, y: ship.y, angle: ship.angle }));
+
+            lasers.forEach((laser, laserIndex) => {
+                laser.x += Math.cos(laser.angle) * 10;
+                laser.y += Math.sin(laser.angle) * 10;
+
+                // Check collision with walls
+                let laserCollision = false;
+                walls.forEach(wall => {
+                    if (laser.x > wall.x && laser.x < wall.x + wall.width &&
+                        laser.y > wall.y && laser.y < wall.y + wall.height) {
+                        laserCollision = true;
+                    }
+                });
+
+                if (laserCollision) {
+                    lasers.splice(laserIndex, 1);
+                } else {
+                    circles.forEach((circle, circleIndex) => {
+                        const dx = laser.x - circle.x;
+                        const dy = laser.y - circle.y;
+                        const distance = Math.sqrt(dx * dx + dy * dy);
+                        if (distance < circle.radius) {
+                            ws.send(JSON.stringify({ type: 'hitCircle', circleId: circle.id, playerId: myId }));
+                            lasers.splice(laserIndex, 1);
+                        }
+                    });
+                }
+
+                // Remove lasers that are out of bounds
+                if (laser.x < 0 || laser.x > GAME_WIDTH || laser.y < 0 || laser.y > GAME_HEIGHT) {
+                    lasers.splice(laserIndex, 1);
+                }
+            });
+        }
+
+        function gameLoop() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            update();
+            drawWalls(); // Draw walls before ships and lasers
+            drawShip(ship.x, ship.y, ship.angle, ship.color);
+            players.forEach((player) => {
+                if (player.id !== myId) {
+                    drawShip(player.x, player.y, player.angle, player.color);
+                }
+            });
+            drawLasers();
+            drawCircles();
+            requestAnimationFrame(gameLoop);
+        }
+
+        function resetGame(newCircles, newWalls) {
+            gameStarted = false;
+            circles = newCircles;
+            walls = newWalls;
+            lasers.length = 0;
+            ship.x = GAME_WIDTH / 2;
+            ship.y = GAME_HEIGHT / 2;
+            ship.angle = 0;
+            startScreen.style.display = 'block';
+            winnerAnnouncement.style.display = 'none';
+            newGameButton.style.display = 'none';
+            if (isHost) {
+                startButton.style.display = 'inline-block';
+            }
+        }
+
+        document.addEventListener('keydown', (e) => {
+            keys[e.code] = true;
+            if (e.code === 'Space' && gameStarted) {
+                ws.send(JSON.stringify({ type: 'shoot', x: ship.x, y: ship.y, angle: ship.angle }));
+            }
+        });
+
+        document.addEventListener('keyup', (e) => {
+            keys[e.code] = false;
+        });
+
+        startButton.addEventListener('click', () => {
+            ws.send(JSON.stringify({ type: 'startGame' }));
+        });
+
+        newGameButton.addEventListener('click', () => {
+            ws.send(JSON.stringify({ type: 'resetGame' }));
+        });
+
+        gameLoop();
+    </script>
+</body>
+</html>
